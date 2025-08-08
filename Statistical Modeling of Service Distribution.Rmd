@@ -1,0 +1,531 @@
+---
+title: "Statistical Modeling of Service Distribution"
+author: Marco Boso
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+```
+
+# Problem description
+
+In our cities, there are some services that are essential for our daily living: pharmacies, schools or transport points of sale. However, these facilities are not necessarily well distributed. We want to analyze in this assignment which areas lacks of these facilities based on regression models. The steps to perform the analysis are:
+
+- EDA: Descriptive analysis of data
+- Feature selection: Are there variables we can discard?
+- Perform a feature engineering process extending important variables
+- Perform regression modelling for the three target variables (three different models).
+- Create a score to measure which areas have enough facilities and which ones don't.
+- Which variables are the most highly related to the score? In particular, what makes a census section to have a low number of facilities?
+- Discuss the results
+
+# Dataset description
+
+```{r}
+df<-fread("census_section_stats.csv", sep=";", dec=",", stringsAsFactors = F)
+head(df, n = 10)
+```
+
+For every census section we have a row in our dataset, here are some of the main columns of the dataset:
+
+* census_section_code: census_section_code identifier
+* n_pharmacies (target variable 1): number of pharmacies in the census section
+* n_schools (target variable 2): number of schools in the census section
+* n_transport_salespoints (target variable 3): number of transport points of sale.
+
+PACKAGES
+
+```{r}
+library(tidyverse)
+library(dplyr)  
+library(readr)
+library(corrplot)
+library(GGally) 
+library(mctest)
+library(ggplot2)
+library(caret)
+library(car)
+library(magick)
+library(glmnet)
+library(MASS)
+library(DataExplorer)
+library(factoextra) 
+library(readr)
+library(DataExplorer)
+library(janitor)
+```
+
+
+# Descriptive analysis
+
+## Inspect the data
+```{r}
+str(df)
+```
+
+```{r}
+plot_intro(df)
+```
+```{r}
+discrete_columns <- names(df)[sapply(df, function(col) {
+  is.integer(col) || (is.numeric(col) && all(col == floor(col), na.rm = TRUE))
+})]
+
+# Print the names of the discrete columns
+print(discrete_columns)
+```
+We have 11 discrete columns; three of this one are our target variables and the 'index' it's just the index of our dataset.
+The 3 target variables are non-negative discrete -> Poisson could work? 
+
+## Analyze the target variables
+n_pharmacies
+```{r}
+#histogram
+hist(df$n_pharmacies)
+
+#mean and variance 
+mean(df$n_pharmacies)
+var(df$n_pharmacies)
+
+#density plot 
+success <- min(df$n_pharmacies):max(df$n_pharmacies)
+
+plot(density(df$n_pharmacies),ylim=c(0,0.5), xlim = c(0,15))+
+lines(success,dpois(success, lambda=mean(df$n_pharmacies)),col="red")
+```
+The analysis of n_pharmacies reveals a heavily right-skewed distribution, with most values concentrated around 0 and 1, as shown in the histogram. The mean (0.661) and variance (0.503) indicate underdispersion relative to a Poisson distribution, which typically has equal mean and variance. The density plot confirms the skewness, showing that the observed data declines more sharply than the fitted Poisson distribution. This suggests the data does not align well with a Poisson model and may require alternative approaches to account for underdispersion.
+
+n_schools
+```{r}
+#histogram
+hist(df$n_schools)
+
+#mean and variance 
+mean(df$n_schools)
+var(df$n_schools)
+
+#density plot 
+success <- min(df$n_schools):max(df$n_schools)
+
+plot(density(df$n_schools),ylim=c(0,0.5), xlim = c(0,15))+
+lines(success,dpois(success, lambda=mean(df$n_schools)),col="orange")
+```
+The analysis of n_schools shows a right-skewed distribution with most values around 0 and 1. The mean (0.91) is lower than the variance (1.79), indicating overdispersion relative to a Poisson distribution. The density plot confirms the mismatch, with the observed data exhibiting a longer tail compared to the Poisson fit. This suggests that alternative models, such as quasi-Poisson or negative binomial regression, may better handle the overdispersion.
+
+n_transport_salespoint
+```{r}
+#histogram
+hist(df$n_transport_salespoints)
+
+#mean and variance 
+mean(df$n_transport_salespoints)
+var(df$n_transport_salespoints)
+
+#density plot 
+success <- min(df$n_transport_salespoints):max(df$n_transport_salespoints)
+
+plot(density(df$n_transport_salespoints),ylim=c(0,0.5), xlim = c(0,15))+
+lines(success,dpois(success, lambda=mean(df$n_transport_salespoints)),col="blue")
+```
+The analysis of n_transport_salespoints reveals a heavily right-skewed distribution, as seen in the histogram, with most values concentrated at 0 or 1. The mean is approximately 0.27, and the variance is 0.26, indicating the data is slightly underdispersed relative to a Poisson distribution, which would typically have equal mean and variance.
+The density plot shows that the observed data falls off quickly after 0, with the Poisson fit closely aligning with the observed distribution initially but diverging for higher values. This suggests that while a Poisson model might fit reasonably well for this variable
+
+## Perform a summary of data to see distribution of explanatory variables
+```{r}
+summary(df)
+```
+
+## rapresentation of the explanatory variables - histogram
+```{r}
+df_numeric <- df |> dplyr::select(where(is.numeric))
+
+# Create histograms for each numeric column
+for (col in names(df_numeric)) {
+  print(
+    ggplot(df, aes_string(x = col)) +
+      geom_histogram(bins = 30, fill = "pink", color = "black", na.rm = TRUE) +
+      labs(title = paste("Histogram of", col), x = col, y = "Frequency") +
+      theme_minimal()
+  )
+}
+```
+The histograms can be categorized into several types of distributions: 
+For uniform distributions, such as the index, where all values are roughly equally distributed, it indicates the variable is an identifier -> no analytical value and can be excluded.
+In right-skewed distributions, like census_section_code, area, foreigners, and income_per_capita, we can improve analysis and interpretability, applying transformations like logarithmic scaling.
+In variables like city_population and pcg_expense_home that exhibit bimodal or multimodal distributions, clustering or segmentation can help group these variables  and analyze the groups independently.
+Bell-shaped distributions, such as avg_age and percentages of age groups like pcg_age_40_49, are suitable for direct inclusion in models without transformations.
+Highly concentrated variables, such as province_code and altitude may not add much variability for modeling.
+In long-tail distributions, like population_density and family_income, analyzing the outliers could help identify unique or standout cases, but transformations may be necessary for pattern detection across the dataset.
+For flat distributions, such as ratio_expense_home, exploring correlations with other variables could help uncover hidden patterns or relationships
+
+# boxplots for the target variables 
+```{r}
+plot_boxplot(df, by = "n_pharmacies")
+```
+The boxplots show that most explanatory variables have overlapping distributions across n_pharmacies levels, indicating weak differentiation. Variables like population_density, family_income, and n_schools show a loose positive association with higher pharmacy counts, while ethnic and demographic variables show minimal relevance. Outliers are present, particularly for higher n_pharmacies levels.
+
+```{r}
+plot_boxplot(df, by = "n_schools")
+```
+Variables like city_population, population_density, and family_income show a tendency for higher values to be associated with higher levels of n_schools, though there is significant overlap between groups. Demographic variables, such as ethnicity proportions, show minimal differentiation across the levels of n_schools, indicating weak predictive power. Facilities-related variables, like n_pharmacies and n_transport_salespoints, display a slight positive association with higher school counts. 
+
+```{r}
+plot_boxplot(df, by = "n_transport_salespoints")
+```
+ Variables such as city_population and population_density show a tendency for higher values to align with larger numbers of transport sales points, although variability within groups is significant. Economic variables like family_income and ratio_expense_home also suggest a positive association, while demographic variables (like ethnic groups) generally display minimal differentiation across n_transport_salespoints levels. Facilities-related variables, such as n_schools and n_pharmacies, show a stronger relationship, with higher values associated with more sales points.
+ 
+## Feature selection
+
+## Correlation 
+```{r}
+plot_correlation(df)
+```
+Looking at the target variabes rows we can see that there are not some strong or weak correlations, but we can see that they could be likely correlated variables include population-related metrics (like city_population or population_density) and that the target variables are correlated with one another (could have shared drivers); let's look more in depth all of the target variables
+
+## Univariate analysis
+## Numeric correlation for n_schools
+```{r}
+correlations_schools <- cor(df_numeric$n_schools, df_numeric, use = "complete.obs")
+
+print(correlations_schools)
+```
+## Numeric correlation for n_pharmacies
+```{r}
+correlations_pharmacies <- cor(df_numeric$n_pharmacies, df_numeric, use = "complete.obs")
+
+print(correlations_pharmacies)
+```
+## Numeric correlation for n_transport_salespoint
+```{r}
+correlations_transport <- cor(df_numeric$n_transport_salespoints, df_numeric, use = "complete.obs")
+
+print(correlations_transport)
+```
+Looking at the overall results for the 3 target variables: we can see that city_population and population_density consistently show positive correlations with all three targets, which could make them strong candidates for explanatory variables in regression models. Then socioeconomic variables (like family_income and income_per_capita) show weak correlations, suggesting limited influence on the targets. Ethnic and demographic variables exhibit negligible correlations, making them less relevant for explaining variations in the targets. And lastly altitude shows weak negative correlations with all three targets, indicating minimal importance.
+We still need to check for multicollinearity in the dataset.
+
+## Check for multicollinearity
+```{r}
+model_n_schools <- lm(n_schools ~  census_district_code + city_code + province_code + area + population + family_income + income_per_capita + avg_age + spanish + foreigners + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_transport_salespoints + pcg_foreigners, data = df_numeric)
+
+#let's check for multicollinearity 
+alias(model_n_schools)$Complete
+```
+```{r}
+model_n_pharmacies <- lm(n_pharmacies ~  census_district_code + city_code + province_code + area + population + family_income + income_per_capita + avg_age + spanish + foreigners + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_schools + n_transport_salespoints + pcg_foreigners, data = df_numeric)
+
+alias(model_n_pharmacies)$Complete
+```
+```{r}
+model_n_transport <- lm(n_transport_salespoints ~  census_district_code + city_code + province_code + area + population + family_income + income_per_capita + avg_age + spanish + foreigners + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_schools + pcg_foreigners, data = df_numeric)
+
+alias(model_n_transport)$Complete
+```
+It looks like, based on the table, that variables like province_code, pcg_foreigners and foreigners are causing collinearity with several other variables. We can remove them to eliminate redundancy. I will remove the province_code, because it's categorical and don't add to much information to the model, for foreigners i have decided to combine the 2 variables together and see if the collinnearity will still be present.
+```{r}
+df_numeric$combined_foreigners <- df_numeric$foreigners * df_numeric$pcg_foreigners
+
+model_n_schools <- lm(n_schools ~  census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_transport_salespoints + combined_foreigners, data = df_numeric)
+
+#let's check for multicollinearity 
+alias(model_n_schools)$Complete
+
+```
+```{r}
+model_n_pharmacies <- lm(n_schools ~  census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_schools + n_transport_salespoints + combined_foreigners, data = df_numeric)
+
+alias(model_n_pharmacies)$Complete
+```
+```{r}
+model_n_transport <- lm(n_schools ~  census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_schools + combined_foreigners, data = df_numeric)
+
+alias(model_n_transport)$Complete
+```
+We have solved the problem of multicollinearity!
+```{r}
+vif_n_schools <- vif(model_n_schools)
+print(vif_n_schools)
+
+vif_n_pharmacies <- vif(model_n_pharmacies)
+print(vif_n_pharmacies)
+
+vif_n_transport <- vif(model_n_transport)
+print(vif_n_transport)
+```
+thw VIfs analysis confirm that we should drop census_district_code, foreigners and pcg_foreigners (we preserve the results in the new variable that we have created combined_foreigners) because they have high levels of multicollinearity.
+
+# regression based selection
+
+## regression for n_schools
+```{r}
+poisson_model <- glm(n_schools ~ census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_transport_salespoints + combined_foreigners, family = poisson, data = df_numeric)
+summary(poisson_model)
+```
+```{r}
+# overdispersion
+dispersion <- sum(residuals(poisson_model, type = "pearson")^2) / poisson_model$df.residual
+print(dispersion) 
+```
+```{r}
+# there is a mildly overdispersion so we will compare the models
+neg_bin_model <- glm.nb(n_schools ~ census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_transport_salespoints + combined_foreigners, data = df_numeric)
+summary(neg_bin_model)
+```
+```{r}
+# AIC to compare the models
+AIC(poisson_model, neg_bin_model)
+```
+Since the model with the lower AIC value is considered better, we need to use the negative binomial model to find the best explanatory variables -> in this case we have, among all the variables (and between the ones that have a p-value < 0.05): 
+family_income: Significant with a p-value < 0.001, suggesting a strong relationship with the number of schools.
+income_per_capita: Also significant with a p-value < 0.001, indicating its importance.
+pcg_age_25_39: Significant with a p-value < 0.05, indicating its relevance to the target variable.
+ratio_expense_home: Significant with a p-value < 0.001, showing strong explanatory power.
+n_transport_salespoints: Significant with a p-value < 0.05, indicating a meaningful relationship.
+population_density: Significant with a p-value < 0.01, highlighting its importance.
+
+
+## regression for n_pharmacies
+```{r}
+poisson_model <- glm(n_pharmacies ~ census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_schools + n_transport_salespoints + combined_foreigners, family = poisson, data = df_numeric)
+summary(poisson_model)
+```
+```{r}
+# check for overdispersion
+dispersion <- sum(residuals(poisson_model, type = "pearson")^2) / poisson_model$df.residual
+print(dispersion) 
+```
+We don't have overdispersion. So, based on our analysis we can confirm that the best explanatory variables are: 
+Family Income (p < 0.001): Strongly significant.
+Income Per Capita (p < 0.01): Significant.
+Population (p < 0.05): Significant.
+City Population (p < 0.01): Significant.
+Ratio Expense Home (p < 0.05): Significant.
+n_Transport Salespoints (p < 0.05): Significant.
+
+## regression for n_transport_salespoints
+```{r}
+poisson_model <- glm(n_transport_salespoints ~ census_district_code + city_code + area + population + family_income + income_per_capita + avg_age + spanish + europeans + germans + bulgarian + french + italian + polish + portuguese + british + romanian + non_european + russian + african + algerian + moroccan + nigerian + senegalese + american + argentinian + bolivian + brazilian + colombian + cuban + chilean + ecuadorian + paraguayan + peruvian + uruguayan + venezuelan + asian + pakistani + oceanic + dominican + pcg_age_0_24 + pcg_age_25_39 + pcg_age_40_49 + pcg_age_50_59 + pcg_age_60_69 + pcg_age_70_y_mas + pcg_expense_home + ratio_expense_home + pcg_num_transaction_city + pcg_num_transaction_norm_city + altitude + city_population + population_density + n_pharmacies + n_schools + combined_foreigners, family = poisson, data = df_numeric)
+summary(poisson_model)
+```
+```{r}
+# overdispersion
+dispersion <- sum(residuals(poisson_model, type = "pearson")^2) / poisson_model$df.residual
+print(dispersion) 
+```
+We don't have overdispersion. So, based on our analysis we can confirm that the best explanatory variables are: 
+City Code (p < 0.05): Significant.
+Population (p < 0.001): Highly significant.
+Family Income (p < 0.001): Highly significant.
+Income Per Capita (p < 0.001): Highly significant.
+City Population (p < 0.05): Significant.
+Population Density (p < 0.05): Significant.
+n_Schools (p < 0.05): Significant.
+Ratio Expense Home (p < 0.01): Significant.
+
+# Feature engineering
+
+## choosing the explanatory variables 
+```{r}
+# List of what i think based on the data analysis and the correlation may be, in my opinion and based on what i have done before, the explanatory variables 
+important_variables <- c(
+  'family_income', 'income_per_capita', 'pcg_age_25_39', 'population', 'city_population', 'ratio_expense_home', 'city_code', 'population_density', 'n_schools', 'n_pharmacies', 'n_transport_salespoints')
+
+df_selected <- df_numeric[, ..important_variables]
+```
+
+## Expand meaningful variables 
+```{r}
+df_selected$income_density <- df_selected$family_income * df_selected$population_density
+df_selected$young_people_income <- df_selected$income_per_capita * df_selected$pcg_age_25_39
+```
+
+```{r}
+df_selected$log_family_income <- log(df_selected$family_income + 1)
+df_selected$log_population_density <- log(df_selected$population_density + 1)
+df_selected$log_population <- log(df_selected$population + 1)
+df_selected$log_city_population <- log(df_selected$city_population + 1)
+df_selected$log_population_density <- log(df_selected$population_density + 1)
+
+```
+For variables like family_income, population, and population_density that exhibit right-skewed distributions (as seen in histograms) we can applying a logarithmic transformation normalizes the data, reducing the impact of extreme values and making the variable more linear.
+```{r}
+df_selected$squared_population <- df_selected$population^2
+df_selected$squared_family_income <- df_selected$family_income^2
+df_selected$squared_population_density <- df_selected$population_density^2
+
+```
+
+```{r}
+df_selected$cubic_family_income <- df_selected$family_income^3
+df_selected$cubic_population_density <- df_selected$population_density^3
+```
+
+
+# Regression models
+
+## Poisson regression for n_pharmacies 
+```{r}
+reg_model_n_pharmacies <- glm(
+  formula = n_pharmacies ~ family_income + cubic_family_income + income_per_capita +
+    population + log_population + city_population + log_city_population +
+    ratio_expense_home + n_transport_salespoints + income_density +
+    log_family_income + log_population_density +
+    squared_population + squared_family_income + squared_population_density +
+    cubic_population_density + cubic_family_income + young_people_income,
+  data = df_selected,
+  family = poisson
+)
+
+# Summary of the Poisson regression model
+summary(reg_model_n_pharmacies)
+
+# Predictions and MAE for Poisson Model
+preds_poisson <- predict(reg_model_n_pharmacies, type = "response")
+poisson_mae <- mean(abs(df_selected$n_pharmacies - preds_poisson))
+print(poisson_mae)
+```
+
+## Negative binomial regression for n_schools
+```{r}
+library(MASS)
+reg_model_n_schools <- glm.nb(
+  formula = n_schools ~ family_income + cubic_family_income + income_per_capita +
+    population + log_population + city_population + log_city_population +
+    ratio_expense_home + n_transport_salespoints + income_density +
+    log_family_income + log_population_density +
+    squared_population + squared_family_income + squared_population_density +
+    cubic_population_density + cubic_family_income + young_people_income,
+  data = df_selected
+)
+
+# Summary of the Negative binomial regression model
+summary(reg_model_n_pharmacies)
+
+# Predictions from the model
+preds_rb <- predict(reg_model_n_schools, type = "response")
+
+# Calculate Mean Absolute Error (MAE)
+rb_mae <- mean(abs(df_selected$n_schools - preds_rb))
+print(rb_mae)
+
+```
+
+## Zero-inflated poisson regression for n_transport_salespoints
+```{r}
+library(pscl)
+
+reg_model_n_transport <- zeroinfl(
+  formula = n_transport_salespoints ~ family_income + cubic_family_income + income_per_capita +
+    population + log_population + city_population + log_city_population +
+    ratio_expense_home + n_transport_salespoints + income_density +
+    log_family_income + log_population_density +
+    squared_population + squared_family_income + squared_population_density +
+    cubic_population_density + cubic_family_income + young_people_income,
+  data = df_selected,
+  dist = "poisson"
+)
+
+summary(reg_model_n_transport)
+
+# Predictions from the Zero-Inflated Poisson Model
+preds_zip <- predict(reg_model_n_transport, type = "response")
+
+# Calculate Mean Absolute Error (MAE) for the ZIP model
+zip_mae <- mean(abs(df_selected$n_transport_salespoints - preds_zip))
+print(zip_mae)
+```
+## Compare models with repect to MAE and AIC 
+```{r}
+mae_results <- list(
+  PoissonModel = list(MAE = poisson_mae),
+  ZIP = list(MAE = zip_mae),
+  NegBin = list(MAE = rb_mae)
+)
+
+# Print the MAE results
+print(mae_results)
+```
+```{r}
+aic_results <- list(
+  AIC = AIC(reg_model_n_pharmacies, reg_model_n_schools, reg_model_n_transport)
+)
+
+# Print the AIC results
+print(aic_results)
+```
+According to AIC and MAE, it appears that the Negative Binomial Model outperforms the other models, followed by the Zero-Inflated Poisson Model (ZIP). This indicates that overdispersion is adequately handled by the Negative Binomial Model. However, the ZIP model also performs well, suggesting the possibility of zero inflation in the data.
+
+# Score generation 
+
+## re-add the Index column to the df_selected
+```{r}
+df_selected$index <- df$index
+```
+
+## Normalize target variables to a 0-1 scale
+```{r}
+normalize <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+df_selected$norm_schools <- normalize(df_selected$n_schools)
+df_selected$norm_pharmacies <- normalize(df_selected$n_pharmacies)
+df_selected$norm_transport_salespoints <- normalize(df_selected$n_transport_salespoints)
+
+# Create the composite score (unweighted sum of normalized variables)
+df_selected$facility_score <- rowMeans(df_selected[, c("norm_schools", "norm_pharmacies", "norm_transport_salespoints")], na.rm = TRUE)
+```
+This part will bring the three target variables (n_schools, n_pharmacies, and n_transport_salespoints) onto the same scale (from 0 to 1). This makes it easier to combine them because they originally had very different ranges.
+By normalizing, we ensure that each variable has an equal say in the final score, no matter if one had a much larger range than the others. After that, we create a facility_score by averaging the three normalized values, which gives a single number to represent how well an area is served by these facilities. This helps us compare areas more fairly.
+
+## Compute correlations with explanatory variables
+```{r}
+correlations <- cor(df_selected$facility_score, df_selected, use = "complete.obs")
+
+# Display variables most correlated with the score
+sorted_correlations <- sort(correlations, decreasing = TRUE)
+print(sorted_correlations)
+```
+## Fit a regression model to predict the score
+```{r}
+score_model <- lm(facility_score ~ family_income + income_per_capita + population_density + pcg_age_25_39 + city_population +
+                  pcg_age_25_39 + ratio_expense_home + log_family_income + log_population_density +
+                  squared_population + squared_family_income, data = df_selected)
+
+# Summarize the model to see key predictors
+summary(score_model)
+```
+This part of the code fits a regression model to predict the facility_score based on various explanatory variables. The goal here is to identify which variables are most strongly related to the score and determine what factors are most important in areas having enough facilities. By looking at the regression output (coefficients and significance levels), we can see which variables have the strongest and most statistically significant relationships with the facility_score.
+The variables that are most highly related to the facility_score are those with the largest coefficients and smallest p-values (significance levels). For example, in this model:
+Variables like family_income, income_per_capita, and population_density are significant predictors of the facility_score.
+These factors indicate that areas with higher income levels and population density tend to have better access to facilities.
+
+## Identify areas with low facility scores
+```{r}
+# Ensure the 'index' column is included in the subset of low facility areas
+low_facility_areas <- df_selected[df_selected$facility_score < quantile(df_selected$facility_score, 0.25), c("index", "facility_score")]
+
+# Display areas with the lowest facility scores along with their index
+print(low_facility_areas)
+```
+This section identifies areas in the bottom 25% of facility scores. Including the index column allows us to pinpoint which census sections are most underserved in terms of facilities.
+ 
+# Results analysis and discussion
+
+## EDA
+
+The first step was an Exploratory Data Analysis (EDA) to better understand the dataset. Here, I looked at the general distribution of the variables and noticed that some were skewed, like family income and population density, meaning that most areas had lower values, but a few had very high ones. This was especially important for the target variables (n_schools, n_pharmacies, and n_transport_salespoints), which showed relatively low means and variances, indicating that facilities were not evenly distributed across areas. Correlation analysis was also helpful at this stage, giving me an idea of which variables were likely related to the target variables.
+
+## Feature selection
+I had to decide which variables to keep and which ones to drop. I used tools like the Variance Inflation Factor (VIF) to check for multicollinearity, which happens when variables are too similar to each other and can cause problems in the models. For example, foreigners and pcg_foreigners were highly related, so I created a new combined_foreigners variable to simplify things. I also dropped variables that didn’t vary much or didn’t seem helpful based on their correlation with the target variables. This helped make the dataset cleaner and more focused.
+
+## Feature engeneering
+I created new variables or transformed existing ones to make the models better. For instance, I used logarithmic transformations on family income and population density because their distributions were skewed, and this helped make their relationships with the target variables more linear. I also created squared and cubic versions of some variables, like average age and population density, to capture non-linear patterns. Additionally, I added interaction terms, like income density, which combines family income and population density, to explore how these factors might work together.
+
+## Regression models
+I built separate regression models for each of the three target variables. Since the data for each target variable had different characteristics, I used different types of regression models. For example, I used Poisson regression to model n_pharmacies and Negative Binomial regression to handle overdispersion for n_schools. For n_transport_salespoints, I tried a Zero-Inflated Poisson (ZIP) model because many areas had zero sales points, and the ZIP model is better at handling that kind of data. The regression results showed which variables were the most important for predicting each target. For instance, population density and family income were key for n_schools, while income_per_capita and combined_foreigners were important for n_pharmacies.
+
+## Creation of the score 
+I created a score to measure which areas had enough facilities and which ones didn’t. To do this, I normalized the three target variables (so they were all on the same scale) and then combined them into a single facility_score. Areas with low scores had fewer facilities overall. I also ran a regression to see which variables were most related to the score, and I found that family income, population density, and city population were highly related, meaning wealthier and more populated areas tended to have better access to facilities.
